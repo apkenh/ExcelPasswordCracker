@@ -7,71 +7,67 @@ import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.concurrent.*;
 import java.util.stream.IntStream;
 
 public class Main {
     public static void main(String[] args) {
-        String fileToCrack = (args.length > 0 && args[1] != null) ? args[1] : "input.xlsx";
+        String fileToCrack = (args.length > 0 && args[1] != null) ? args[1] : "src/test/resources/test_file.xlsx";
         final File inputFile = new File(fileToCrack);
         String crackedPassword = crackPassword(inputFile);
         System.out.println("Password found: " + crackedPassword);
     }
 
     public static String crackPassword(File inputFile) {
-        Character[] charSet = crackingCharacterSet();
+        char[] charSet = prepareCrackingCharacterSet();
 
-        // Parameters
-        final int minPasswordLength = 2;
-        final int maxPasswordLength = Integer.MAX_VALUE;
+        int minPasswordLength = 2;
+        int maxPasswordLength = 16;
 
-        // Thread pool
         int threadCount = Runtime.getRuntime().availableProcessors();
+
         ExecutorService threadPoolExecutor = new ThreadPoolExecutor(threadCount, threadCount, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<>());
         CompletableFuture<String> cf = new CompletableFuture<>();
-        BlockingQueue<String> passwordQueue = new LinkedBlockingQueue<>(threadCount * 2);
+        BlockingQueue<String> passwordQueue = new LinkedBlockingQueue<>(threadCount * 32);
 
-        // Runnables to execute
         final Decryptor excelDecryptor = getDecryptor(inputFile);
+
         Runnable producer = passwordProvider(charSet, passwordQueue, minPasswordLength, maxPasswordLength);
         Runnable consumer = passwordCracker(cf, passwordQueue, excelDecryptor);
 
         executeRunnableDesiredTimes(1, threadPoolExecutor, producer);
-        executeRunnableDesiredTimes(threadCount - 1, threadPoolExecutor, consumer);
+        executeRunnableDesiredTimes(threadCount - 3, threadPoolExecutor, consumer);
 
-        String result = crackPassword(threadPoolExecutor, cf);
-        return result;
+        return doCrackPassword(threadPoolExecutor, cf);
     }
 
-    private static Character[] crackingCharacterSet() {
-        // Character set for cracking
+    private static char[] prepareCrackingCharacterSet() {
         ArrayList<Character> characters = new ArrayList<>();
-        // Lower case
-        IntStream.range(97, 123).forEach(i -> characters.add((char) i));
-        // Upper case
-        IntStream.range(65, 91).forEach(i -> characters.add((char) i));
-        // Numbers
-        IntStream.range(48, 58).forEach(i -> characters.add((char) i));
 
-        Character[] charSet = getCharSet(characters);
-        return charSet;
+        IntStream.range(97, 123).forEach(i -> characters.add((char)i));
+        //IntStream.range(97, 127).forEach(i -> characters.add((char)i));
+        //IntStream.range(65, 97).forEach(i -> characters.add((char)i));
+        //IntStream.range(33, 65).forEach(i -> characters.add((char)i));
+
+        return getCharSet(characters);
     }
 
-    private static String crackPassword(ExecutorService service, CompletableFuture<String> cf) {
+    private static String doCrackPassword(ExecutorService service, CompletableFuture<String> cf) {
         String result = "";
+
         try {
             Instant start = Instant.now();
             result = cf.get();
             Instant finish = Instant.now();
-            long timeElapsed = Duration.between(start, finish).toSeconds();
-            System.out.println("Total time elapsed: " + timeElapsed + "s");
+            long timeElapsed = Duration.between(start, finish).toMillis();
+            System.out.println("Total time elapsed: " + timeElapsed + "ms");
             service.shutdownNow();
         } catch (InterruptedException | ExecutionException e) {
             e.printStackTrace();
         }
+
         return result;
     }
 
@@ -81,21 +77,34 @@ public class Main {
         }
     }
 
-    private static Runnable passwordProvider(Character[] charSet, BlockingQueue<String> passwordQueue, int minLen, int maxLen) {
-        int charSetSize = charSet.length;
+    private static Runnable passwordProvider(char[] charSet, BlockingQueue<String> passwordQueue, int minLen, int maxLen) {
         return () -> {
-            generatorLoop:
-            for (int i = minLen; i < maxLen; ++i) {
-                ArrayList<String> passwords = new ArrayList<>();
-                passwords.addAll(generatePasswordsForDesiredLength(charSet, i, "", charSetSize));
-                for (int j = 0; j < passwords.size(); j++) {
-                    String pass = passwords.get(j);
+            char[] result = new char[maxLen];
+            int[] index = new int[maxLen];
+
+            int charSetSize = charSet.length;
+
+            Arrays.fill(result, 0, maxLen, charSet[0]);
+            Arrays.fill(index, 0, maxLen, 0);
+
+            for (int i = minLen; i <= maxLen; i++) {
+                int updateIndex = 0;
+
+                do {
                     try {
-                        passwordQueue.offer(pass, 12, TimeUnit.HOURS);
-                    } catch (InterruptedException ignored) {
-                        break generatorLoop;
+                        passwordQueue.offer(new String(result, 0, i), 12, TimeUnit.HOURS);
+                    } catch (InterruptedException e) {
+                        break;
                     }
-                }
+
+                    for (updateIndex = i-1;
+                         updateIndex != -1 && ++index[updateIndex] == charSetSize;
+                         result[updateIndex] = charSet[0], index[updateIndex] = 0, updateIndex--);
+
+                    if(updateIndex != -1) {
+                        result[updateIndex] = charSet[index[updateIndex]];
+                    }
+                } while (updateIndex != -1);
             }
         };
     }
@@ -105,7 +114,7 @@ public class Main {
             while (!Thread.interrupted()) {
                 try {
                     String password = passwordQueue.take();
-                    print("Testing password: " + password);
+                    //System.out.println("Testing password: " + password);
                     boolean decryptResult = excelDecryptor.verifyPassword(password);
                     if (decryptResult) {
                         cf.complete(password);
@@ -131,35 +140,14 @@ public class Main {
             e.printStackTrace();
         }
 
-        Decryptor finalDecryptor = decryptor;
-        return finalDecryptor;
+        return decryptor;
     }
 
-    private static Character[] getCharSet(ArrayList<Character> letters) {
-        Character[] chars = new Character[letters.size()];
-        for (int i = 0; i < chars.length; ++i) {
+    private static char[] getCharSet(ArrayList<Character> letters) {
+        char[] chars = new char[letters.size()];
+        for (int i = 0; i < chars.length; i++) {
             chars[i] = letters.get(i);
         }
         return chars;
-    }
-
-    static ArrayList<String> generatePasswordsForDesiredLength(Character[] arr, int i, String s, int length) {
-        ArrayList<String> passwords = new ArrayList<>();
-        if (i == 0) {
-            passwords.add(s);
-            return passwords;
-        }
-        for (int j = 0; j < length; j++) {
-            String appended = s + arr[j];
-            passwords.addAll(generatePasswordsForDesiredLength(arr, i - 1, appended, length));
-        }
-        return passwords;
-    }
-
-    static void print(Object output) {
-        String formattedTime = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss.SSSSSSS")
-                .withZone(ZoneId.systemDefault())
-                .format(Instant.now());
-        System.out.printf("%s: %ss - %s%n", formattedTime, Thread.currentThread().getName(), output);
     }
 }

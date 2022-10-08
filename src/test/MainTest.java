@@ -3,7 +3,6 @@ import org.junit.Test;
 
 import java.io.File;
 
-
 public class MainTest {
     @Test
     public void givenSystemOutRedirection_whenInvokePrintln_thenOutputCaptorSuccess() {
